@@ -1,0 +1,68 @@
+import org.apache.spark.ml.Pipeline
+import org.apache.spark.ml.classification.RandomForestClassifier
+import org.apache.spark.ml.evaluation.BinaryClassificationEvaluator
+import org.apache.spark.ml.feature.{StringIndexer, VectorAssembler}
+import org.apache.spark.sql.functions._
+import org.apache.spark.sql.SparkSession
+
+// Create a Spark session
+val spark = SparkSession.builder.appName("RandomForestSurvivalPrediction").getOrCreate()
+
+// Assuming you have a DataFrame named 'datasetWithAgeGroup'
+// Select the relevant columns for building the model
+
+
+val selectedData = trainingDataset.select("Survived", "Pclass", "Sex", "AgeGroup", "Fare", "OnboardFamilySize")
+
+// Convert "AgeGroup" and "Sex" columns to numerical values
+val sexIndexer = new StringIndexer()
+  .setInputCol("Sex")
+  .setOutputCol("SexIndex")
+val ageGroupIndexer = new StringIndexer()
+  .setInputCol("AgeGroup")
+  .setOutputCol("AgeGroupIndex")
+
+// Assemble features into a vector
+val featureCols = Array("Pclass", "SexIndex", "AgeGroupIndex", "Fare", "OnboardFamilySize")
+val assembler = new VectorAssembler()
+  .setInputCols(featureCols)
+  .setOutputCol("features")
+
+// Initialize the Random Forest classifier
+val randomForest = new RandomForestClassifier()
+  .setLabelCol("Survived")
+  .setFeaturesCol("features")
+  .setNumTrees(100) // You can adjust the number of trees as needed
+
+// Create a pipeline
+val pipeline = new Pipeline().setStages(Array(sexIndexer, ageGroupIndexer, assembler, randomForest))
+
+// Split the data into training and testing sets
+val Array(trainingData, testData) = selectedData.randomSplit(Array(0.7, 0.3))
+
+// Train the model
+val model = pipeline.fit(trainingData)
+
+// Save the model to a specified path
+val modelPath = "/Users/shreemoynanda/Desktop/NEU/CYSE7200_Scala/Assignment/Spark_Assignment_2/PredictionModel"
+model.write.overwrite().save(modelPath)
+
+// Make predictions on the testing set
+val predictions = model.transform(testData)
+// Filter rows where "Survived" column is equal to 1
+val survivedRows = predictions.filter(col("Survived") === 1)
+
+// Show more than 20 rows
+survivedRows.show(survivedRows.count.toInt, false)
+
+// Evaluate the model
+val evaluator = new BinaryClassificationEvaluator()
+  .setLabelCol("Survived")
+  .setRawPredictionCol("rawPrediction")
+  .setMetricName("areaUnderROC")
+val areaUnderROC = evaluator.evaluate(predictions)
+
+println(s"Area Under ROC = $areaUnderROC")
+
+// Stop the Spark session
+spark.stop()

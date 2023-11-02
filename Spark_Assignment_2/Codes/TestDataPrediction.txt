@@ -1,0 +1,72 @@
+import org.apache.spark.sql.functions._
+import org.apache.spark.sql.types._
+import org.apache.spark.sql.functions._
+import org.apache.spark.sql.DataFrame
+import org.apache.spark.sql.Row
+import org.apache.spark.sql.SparkSession
+import org.apache.spark.ml.PipelineModel
+import org.apache.spark.ml.feature.{StringIndexer, VectorAssembler}
+import org.apache.spark.sql.functions._
+
+// Creating a Spark session
+val spark = SparkSession.builder.appName("RandomForestSurvivalPrediction").getOrCreate()
+
+// Loading the test dataset
+val testData_temp = spark.read.option("header", "true").csv("/Users/shreemoynanda/Desktop/NEU/CYSE7200_Scala/Assignment/Spark_Assignment_2/test.csv")
+
+// As the Data is being loaded from CSV the initial datatype of columns in string.
+// Using Cast function to put set the data type of each column  to the required Data type.
+val testData = testData_temp.withColumn("PassengerId", testData_temp("PassengerId").cast(IntegerType)).withColumn("Pclass", testData_temp("Pclass").cast(IntegerType)).withColumn("Name", testData_temp("Name").cast(StringType)).withColumn("Sex", testData_temp("Sex").cast(StringType)).withColumn("Age", testData_temp("Age").cast(DoubleType)).withColumn("SibSp", testData_temp("SibSp").cast(IntegerType)).withColumn("Parch", testData_temp("Parch").cast(IntegerType)).withColumn("Ticket", testData_temp("Ticket").cast(StringType)).withColumn("Fare", testData_temp("Fare").cast(DoubleType)).withColumn("Cabin", testData_temp("Cabin").cast(StringType)).withColumn("Embarked", testData_temp("Embarked").cast(StringType))
+
+
+// finding the median value of the Age as per Pclass
+val medianAgeByPclass = testData.groupBy("Pclass").agg(expr("percentile_approx(Age, 0.5)").as("MedianAge"))
+medianAgeByPclass.show()
+
+// replacing the null values in age column by median age by Pclass
+val cleanedDatasetByAge = testData.join(medianAgeByPclass, Seq("Pclass"), "left").withColumn("Age", when(col("Age").isNull, col("MedianAge")).otherwise(col("Age"))).drop("MedianAge")
+cleanedDatasetByAge.show()
+
+// finding the mean value of the Fare as per Pclass
+val meanFareByClass = cleanedDatasetByAge.groupBy("Pclass").agg(mean("Fare").as("MeanFare"))
+
+// joining the mean fare in a new column with rest of the dataset.
+val testDataWithMeanFare = cleanedDatasetByAge.join(meanFareByClass, Seq("Pclass"), "left")
+
+// Replace null values in "Fare" with the corresponding mean fare and the dropping the Mean Fare column
+val testDataWithFilledFare = testDataWithMeanFare.withColumn("Fare",
+  when(col("Fare").isNull, col("MeanFare")).otherwise(col("Fare"))
+).drop("MeanFare")
+
+// Dropping the "Cabin" Column
+val testDataWithoutCabin = testDataWithFilledFare.drop("Cabin")
+
+// Adding the "Onboard_Family_Size" Column with the logic the person himself, Sibling/Spouse and Parent/Childen being counted all together as a single family
+val datasetWithFamilySize = testDataWithoutCabin.withColumn("OnboardFamilySize", lit(1) + col("SibSp") + col("Parch"))
+datasetWithFamilySize.show()
+
+// Adding a new column as called "Age Group". Creating 5 categories in total
+val datasetWithAgeGroup = datasetWithFamilySize.withColumn("AgeGroup", when(col("Age") < 18, "Under 18").when(col("Age") >= 18 && col("Age") <= 30, "19 - 30").when(col("Age") >= 31 && col("Age") <= 50, "31 - 50").when(col("Age") >= 51 && col("Age") <= 65, "51 - 65").otherwise("Above 65"))
+datasetWithAgeGroup.show()
+
+
+// Convert "AgeGroup" and "Sex" columns to numerical values
+val sexIndexer = new StringIndexer().setInputCol("Sex").setOutputCol("SexIndex")
+val ageGroupIndexer = new StringIndexer().setInputCol("AgeGroup").setOutputCol("AgeGroupIndex")
+
+// Assemble features into a vector
+val featureCols = Array("Pclass", "SexIndex", "AgeGroupIndex", "Fare", "OnboardFamilySize")
+val assembler = new VectorAssembler().setInputCols(featureCols).setOutputCol("features")
+
+//Loading the Training Model.
+val trainedModel = PipelineModel.load("/Users/shreemoynanda/Desktop/NEU/CYSE7200_Scala/Assignment/Spark_Assignment_2/PredictionModel")
+
+// Apply the trained model to make predictions
+val predictions = trainedModel.transform(datasetWithAgeGroup)
+
+// Display the predictions
+predictions.show()
+
+// Stop the Spark session
+spark.stop()
+

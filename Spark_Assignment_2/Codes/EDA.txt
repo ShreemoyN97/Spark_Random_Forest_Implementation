@@ -1,0 +1,163 @@
+import org.apache.spark.sql.types._
+import org.apache.spark.sql.functions._
+import org.apache.spark.ml.feature.VectorAssembler
+import org.apache.spark.ml.stat.Correlation
+import org.apache.spark.ml.linalg.Matrix
+import org.apache.spark.sql.DataFrame
+import org.apache.spark.sql.Row
+
+//loading the train dataset
+val trainData = spark.read.option("header", "true").csv("/Users/shreemoynanda/Desktop/NEU/CYSE7200_Scala/Assignment/Spark_Assignment_2/train.csv")
+trainData.printSchema()
+
+//updating the columns in train dataset to correct data type
+val updatedData = trainData.withColumn("PassengerId", trainData("PassengerId").cast(IntegerType)).withColumn("Survived", trainData("Survived").cast(IntegerType)).withColumn("Pclass", trainData("Pclass").cast(IntegerType)).withColumn("Name", trainData("Name").cast(StringType)).withColumn("Sex", trainData("Sex").cast(StringType)).withColumn("Age", trainData("Age").cast(DoubleType)).withColumn("SibSp", trainData("SibSp").cast(IntegerType)).withColumn("Parch", trainData("Parch").cast(IntegerType)).withColumn("Ticket", trainData("Ticket").cast(StringType)).withColumn("Fare", trainData("Fare").cast(DoubleType)).withColumn("Cabin", trainData("Cabin").cast(StringType)).withColumn("Embarked", trainData("Embarked").cast(StringType))
+updatedData.printSchema()
+
+//null counts on each column
+val nullCounts = updatedData.select(trainData.columns.map(colName =>sum(when(col(colName).isNull || col(colName) === "", 1).otherwise(0)).alias(colName)): _*)
+nullCounts.show()
+
+// finding the median value of the Age as per Pclass
+val medianAgeByPclass = trainData.groupBy("Pclass").agg(expr("percentile_approx(Age, 0.5)").as("MedianAge"))
+medianAgeByPclass.show()
+
+// replacing the null values in age column by median age by Pclass
+val cleanedDatasetByAge = updatedData.join(medianAgeByPclass, Seq("Pclass"), "left").withColumn("Age", when(col("Age").isNull, col("MedianAge")).otherwise(col("Age"))).drop("MedianAge")
+cleanedDatasetByAge.show()
+
+// replacing the null values in Embarked column using the Port of Origin [Southampton(S)]
+val cleanedDatasetByEmbarked = cleanedDatasetByAge.withColumn("Embarked", coalesce(col("Embarked"), lit("S")))
+cleanedDatasetByEmbarked.show()
+
+//null counts on each column of cleaned Dataset
+val nullCounts_1 = cleanedDatasetByEmbarked.select(cleanedDatasetByEmbarked.columns.map(colName =>sum(when(col(colName).isNull || col(colName) === "", 1).otherwise(0)).alias(colName)): _*)
+nullCounts.show()
+
+val cleanedTrainDataset = cleanedDatasetByEmbarked
+
+//EDA
+//1. Survival Analysis: What is the overall survival rate?
+
+val totalPassengers = cleanedTrainDataset.count()
+val survivors = cleanedTrainDataset.filter(col("Survived") === 1).count()
+val survivalRate = survivors.toDouble / totalPassengers
+println(s"The overall survival rate is: ${survivalRate * 100}%")
+
+
+//2. Survival by Gender: How does survival vary by gender?
+
+val genderSurvival = cleanedTrainDataset.groupBy("Sex").agg(count("*").alias("TotalPassengers"),sum(when(col("Survived") === 1, 1).otherwise(0)).alias("SurvivedPassengers")).withColumn("SurvivalRate", col("SurvivedPassengers") / col("TotalPassengers") * 100)
+genderSurvival.show()
+
+
+//3. Survival by Class: Is there a correlation between passenger class and survival?
+
+val classSurvivalCounts = cleanedTrainDataset.groupBy("Pclass", "Survived").count().orderBy("Pclass", "Survived")
+val classTotalCountByPClasss = cleanedTrainDataset.groupBy("Pclass").agg(count("*").alias("TotalCountByPClass"))
+val classSurvivalRates = classSurvivalCounts.join(classTotalCountByPClasss, Seq("Pclass"), "left").withColumn("SurvivalRateByPClass", col("count") / col("TotalCountByPClass")).orderBy("Pclass") // Order by Pclass
+classSurvivalRates.show()
+
+
+//4. Survival by Age: Is there a relationship between age and survival?
+val survivalByAgeGroup = cleanedTrainDataset.withColumn("AgeGroup", when(col("Age").isNull, "Unknown").otherwise(when(col("Age") < 18, "Under 18").otherwise(when(col("Age") < 41, "18-40").otherwise(when(col("Age") < 66, "41-65").otherwise("Above 65"))))).groupBy("AgeGroup").agg(sum(when(col("Survived") === 1, 1).otherwise(0)).alias("SurvivedCount"), sum(when(col("Survived") === 0, 1).otherwise(0)).alias("NotSurvivedCount"), count("*").alias("TotalCount"), avg("Survived").alias("SurvivalRate"))
+survivalByAgeGroup.show()
+
+
+//5. Age Distribution: What is the distribution of passenger ages by Passenger Class?
+
+val ageDistributionByPclass = cleanedTrainDataset.groupBy("Pclass").agg(mean("Age").alias("MeanAge"),stddev("Age").alias("StdDevAge"),expr("percentile_approx(Age, 0.5)").alias("MedianAge"))
+ageDistributionByPclass.show()
+
+
+//6. Fare Distribution: How are the ticket fares distributed by Passenger Class?
+
+val fareDistributionData = cleanedTrainDataset.select("Pclass", "Fare")
+// Group the data by passenger class (Pclass)
+val groupedData = fareDistributionData.groupBy("Pclass")
+// Calculate statistics on fare distribution for each class
+val fareStats = groupedData.agg(mean("Fare").alias("MeanFare"), min("Fare").alias("MinFare"), max("Fare").alias("MaxFare"), stddev("Fare").alias("StdDevFare"), expr("percentile_approx(Fare, 0.5)").alias("MedianFare"))
+val orderedFareStats = fareStats.orderBy("Pclass")
+orderedFareStats.show()
+
+
+//7. Family Size Analysis: How does the family size (SibSp + Parch) correlate with survival?
+
+// Calculate family size by adding SibSp and Parch
+val familySizeData = cleanedTrainDataset.withColumn("FamilySize", lit(1) + col("SibSp") + col("Parch"))
+// Select the relevant columns for analysis
+val familySurvivalData = familySizeData.select("Survived", "FamilySize")
+// Group the data by family size
+val groupedData = familySurvivalData.groupBy("FamilySize")
+// Calculate survival statistics for each family size
+val survivalStats = groupedData.agg(count("Survived").alias("PassengerCount"),sum("Survived").alias("SurvivedCount"),mean("Survived").alias("SurvivalRate"))
+survivalStats.show()
+
+
+//8. Survival by Embarked Port: Is there any correlation between the port of embarkation and survival?
+
+val embarkedSurvivalData = cleanedTrainDataset.select("Embarked", "Survived")
+// Group the data by the port of embarkation
+val groupedData = embarkedSurvivalData.groupBy("Embarked")
+// Calculate survival statistics for each port
+val survivalStats = groupedData.agg(count("Survived").alias("PassengerCount"),sum("Survived").alias("SurvivedCount"),mean("Survived").alias("SurvivalRate"))
+survivalStats.show()
+
+
+//9. Most common Last Name by Passenger Class
+
+// Select the relevant columns for analysis
+val namePclassData = cleanedTrainDataset.select("Name", "Pclass")
+// Extract the last name from the "Name" column
+val lastNameData = namePclassData.withColumn("LastName", regexp_extract(col("Name"), "(\\w+),", 1))
+// Group the data by passenger class (Pclass) and last name
+val groupedData = lastNameData.groupBy("Pclass", "LastName")
+// Count the occurrences of each last name within each class
+val lastNameCounts = groupedData.count()
+// Find the most common last name for each class
+val mostCommonLastNameByClass = lastNameCounts.orderBy(desc("count")).groupBy("Pclass").agg(first("LastName").alias("MostCommonLastName"))
+mostCommonLastNameByClass.show()
+
+
+//10. Correlation Heatmap: Are there correlations between various numerical features?
+
+// Select the relevant numerical columns
+val numericalCols = Array("Survived", "Pclass", "Age", "SibSp", "Parch", "Fare")
+val numericalData = cleanedTrainDataset.select(numericalCols.map(col): _*)
+// Assemble the features into a single vector column
+val featureCols = numericalCols.drop(0) // Exclude "Survived" from features
+val assembler = new VectorAssembler().setInputCols(featureCols).setOutputCol("features")
+val assembledData = assembler.transform(numericalData).select("features")
+// Compute the correlation matrix
+val Row(correlationMatrix: Matrix) = Correlation.corr(assembledData, "features").head
+// Extract the correlation values from the matrix
+val correlationArray = correlationMatrix.toArray
+// Create a DataFrame to display the correlation values as a heatmap
+val numRows = featureCols.length
+val numCols = featureCols.length
+val corrHeatmapData = (0 until numRows).flatMap { i =>(0 until numCols).map { j =>(featureCols(i), featureCols(j), correlationArray(i * numCols + j))}}.toSeq
+val corrHeatmapDF = corrHeatmapData.toDF("Feature1", "Feature2", "Correlation")
+// Display the correlation heatmap DataFrame
+corrHeatmapDF.show()
+
+
+//11. Passenger Count by Class and Gender: How many passengers are in each class based on gender?
+
+// Select the relevant columns for analysis
+val classGenderData = cleanedTrainDataset.select("Pclass", "Sex")
+// Group the data by both "Pclass" and "Sex"
+val groupedData = classGenderData.groupBy("Pclass", "Sex")
+// Count the number of passengers in each group
+val passengerCounts = groupedData.agg(count("*").alias("PassengerCount")).orderBy("Pclass", "Sex")
+passengerCounts.show()
+
+
+//12. Fare Analysis by Embarked Port: How do fares vary depending on the embarked port?
+
+// Select the relevant columns for analysis
+val embarkedFareData = cleanedTrainDataset.select("Embarked", "Fare")
+// Group the data by the embarked port
+val groupedData = embarkedFareData.groupBy("Embarked")
+// Calculate statistics on fares for each port
+val fareStats = groupedData.agg(mean("Fare").alias("MeanFare"), min("Fare").alias("MinFare"), max("Fare").alias("MaxFare"), stddev("Fare").alias("StdDevFare"))
+fareStats.show()

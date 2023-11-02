@@ -1,0 +1,54 @@
+import org.apache.spark.sql.functions._
+import org.apache.spark.sql.types._
+import org.apache.spark.sql.DataFrame
+import org.apache.spark.sql.Row
+
+//loading the train dataset
+val trainData = spark.read.option("header", "true").csv("/Users/shreemoynanda/Desktop/NEU/CYSE7200_Scala/Assignment/Spark_Assignment_2/train.csv")
+trainData.printSchema()
+
+//updating the columns in train dataset to correct data type
+val updatedData = trainData.withColumn("PassengerId", trainData("PassengerId").cast(IntegerType)).withColumn("Survived", trainData("Survived").cast(IntegerType)).withColumn("Pclass", trainData("Pclass").cast(IntegerType)).withColumn("Name", trainData("Name").cast(StringType)).withColumn("Sex", trainData("Sex").cast(StringType)).withColumn("Age", trainData("Age").cast(DoubleType)).withColumn("SibSp", trainData("SibSp").cast(IntegerType)).withColumn("Parch", trainData("Parch").cast(IntegerType)).withColumn("Ticket", trainData("Ticket").cast(StringType)).withColumn("Fare", trainData("Fare").cast(DoubleType)).withColumn("Cabin", trainData("Cabin").cast(StringType)).withColumn("Embarked", trainData("Embarked").cast(StringType))
+updatedData.printSchema()
+
+//null counts on each column
+val nullCounts = updatedData.select(trainData.columns.map(colName =>sum(when(col(colName).isNull || col(colName) === "", 1).otherwise(0)).alias(colName)): _*)
+nullCounts.show()
+
+// finding the median value of the Age as per Pclass
+val medianAgeByPclass = trainData.groupBy("Pclass").agg(expr("percentile_approx(Age, 0.5)").as("MedianAge"))
+medianAgeByPclass.show()
+
+// replacing the null values in age column by median age by Pclass
+val cleanedDatasetByAge = updatedData.join(medianAgeByPclass, Seq("Pclass"), "left").withColumn("Age", when(col("Age").isNull, col("MedianAge")).otherwise(col("Age"))).drop("MedianAge")
+cleanedDatasetByAge.show()
+
+// replacing the null values in Embarked column using the Port of Origin [Southampton(S)]
+val cleanedDatasetByEmbarked = cleanedDatasetByAge.withColumn("Embarked", coalesce(col("Embarked"), lit("S")))
+cleanedDatasetByEmbarked.show()
+
+//null counts on each column of cleaned Dataset
+val nullCounts_1 = cleanedDatasetByEmbarked.select(cleanedDatasetByEmbarked.columns.map(colName =>sum(when(col(colName).isNull || col(colName) === "", 1).otherwise(0)).alias(colName)): _*)
+nullCounts.show()
+
+// Changing the name of the dataset
+val cleanedTrainDataset = cleanedDatasetByEmbarked
+
+// Adding the "Onboard_Family_Size" Column with the logic the person himself, Sibling/Spouse and Parent/Childen being counted all together as a single family
+val datasetWithFamilySize = cleanedTrainDataset.withColumn("OnboardFamilySize", lit(1) + col("SibSp") + col("Parch"))
+datasetWithFamilySize.show()
+val datasetWithoutCabin = datasetWithFamilySize.drop("Cabin")
+
+datasetWithoutCabin.show()
+// Assuming you have a DataFrame named 'datasetWithoutCabin' with the "Age" column
+val datasetWithAgeGroup = datasetWithoutCabin.withColumn("AgeGroup", when(col("Age") < 18, "Under 18").when(col("Age") >= 18 && col("Age") <= 30, "19 - 30").when(col("Age") >= 31 && col("Age") <= 50, "31 - 50").when(col("Age") >= 51 && col("Age") <= 65, "51 - 65").otherwise("Above 65"))
+datasetWithAgeGroup.show()
+
+// Remaining the dataset to trainingDataset
+val trainingDataset = datasetWithAgeGroup
+
+// Setting an output Path for storing the cleaned training dataset
+val outputPath = "/Users/shreemoynanda/Desktop/NEU/CYSE7200_Scala/Assignment/Spark_Assignment_2/TrainingDataset"
+
+// Assuming you want to save the 'trainingDataset' DataFrame
+trainingDataset.write.mode("overwrite").option("header", "true").csv(outputPath)
